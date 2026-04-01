@@ -1,0 +1,31 @@
+project_id  = "your-gcp-project-id"
+region      = "us-central1"
+zone        = "us-central1-a"
+environment = "prod"
+app_name    = "cloudmart"
+
+# Networking
+vpc_cidr            = "10.0.0.0/16"
+gke_subnet_cidr     = "10.0.1.0/24"
+gke_pods_cidr       = "10.1.0.0/16"
+gke_services_cidr   = "10.2.0.0/20"
+private_subnet_cidr = "10.0.2.0/24"
+
+# GKE
+gke_node_count   = 2
+gke_min_nodes    = 1
+gke_max_nodes    = 5
+gke_machine_type = "e2-standard-4"
+
+# Database
+db_tier = "db-g1-small"
+db_name = "cloudmart"
+db_user = "cloudmart_admin"
+
+# Compute Engine
+worker_machine_type = "e2-medium"
+
+# Application
+domain_name         = "cloudmart.demo"
+notification_email  = "orders@cloudmart.demo"
+image_tag           = "latest"

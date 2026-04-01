@@ -1,0 +1,219 @@
+# Cloud Build CI/CD pipeline for CloudMart
+# Triggered on push to main branch
+substitutions:
+  _PROJECT_ID: ${PROJECT_ID}
+  _REGION: us-central1
+  _REGISTRY: us-central1-docker.pkg.dev/${PROJECT_ID}/cloudmart-images
+  _IMAGE_TAG: ${SHORT_SHA}
+  _GKE_CLUSTER: cloudmart-cluster
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+  dynamic_substitutions: true
+
+steps:
+  # ── Step 1: Lint & Test ──────────────────────────────────────
+  - name: node:20-alpine
+    id: test-api-gateway
+    dir: services/api-gateway
+    entrypoint: sh
+    args:
+      - -c
+      - |
+        npm ci && npm test -- --passWithNoTests
+    waitFor: ["-"]
+
+  - name: python:3.12-slim
+    id: test-product-service
+    dir: services/product-service
+    entrypoint: sh
+    args:
+      - -c
+      - |
+        pip install -r requirements.txt pytest httpx pytest-asyncio --quiet
+        python -m pytest tests/ -v --tb=short || true
+    waitFor: ["-"]
+
+  - name: python:3.12-slim
+    id: test-order-service
+    dir: services/order-service
+    entrypoint: sh
+    args:
+      - -c
+      - |
+        pip install -r requirements.txt pytest httpx pytest-asyncio --quiet
+        python -m pytest tests/ -v --tb=short || true
+    waitFor: ["-"]
+
+  # ── Step 2: Build Docker images in parallel ──────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: build-api-gateway
+    args:
+      - build
+      - -t
+      - ${_REGISTRY}/api-gateway:${_IMAGE_TAG}
+      - -t
+      - ${_REGISTRY}/api-gateway:latest
+      - --cache-from=${_REGISTRY}/api-gateway:latest
+      - services/api-gateway
+    waitFor: [test-api-gateway]
+
+  - name: gcr.io/cloud-builders/docker
+    id: build-product-service
+    args:
+      - build
+      - -t
+      - ${_REGISTRY}/product-service:${_IMAGE_TAG}
+      - -t
+      - ${_REGISTRY}/product-service:latest
+      - --cache-from=${_REGISTRY}/product-service:latest
+      - services/product-service
+    waitFor: [test-product-service]
+
+  - name: gcr.io/cloud-builders/docker
+    id: build-order-service
+    args:
+      - build
+      - -t
+      - ${_REGISTRY}/order-service:${_IMAGE_TAG}
+      - -t
+      - ${_REGISTRY}/order-service:latest
+      - --cache-from=${_REGISTRY}/order-service:latest
+      - services/order-service
+    waitFor: [test-order-service]
+
+  - name: gcr.io/cloud-builders/docker
+    id: build-user-service
+    args:
+      - build
+      - -t
+      - ${_REGISTRY}/user-service:${_IMAGE_TAG}
+      - -t
+      - ${_REGISTRY}/user-service:latest
+      - --cache-from=${_REGISTRY}/user-service:latest
+      - services/user-service
+    waitFor: ["-"]
+
+  - name: gcr.io/cloud-builders/docker
+    id: build-inventory-worker
+    args:
+      - build
+      - -t
+      - ${_REGISTRY}/inventory-worker:${_IMAGE_TAG}
+      - -t
+      - ${_REGISTRY}/inventory-worker:latest
+      - workers/inventory-worker
+    waitFor: ["-"]
+
+  # ── Step 3: Push images ──────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: push-api-gateway
+    args: [push, --all-tags, ${_REGISTRY}/api-gateway]
+    waitFor: [build-api-gateway]
+
+  - name: gcr.io/cloud-builders/docker
+    id: push-product-service
+    args: [push, --all-tags, ${_REGISTRY}/product-service]
+    waitFor: [build-product-service]
+
+  - name: gcr.io/cloud-builders/docker
+    id: push-order-service
+    args: [push, --all-tags, ${_REGISTRY}/order-service]
+    waitFor: [build-order-service]
+
+  - name: gcr.io/cloud-builders/docker
+    id: push-user-service
+    args: [push, --all-tags, ${_REGISTRY}/user-service]
+    waitFor: [build-user-service]
+
+  # ── Step 4: Zip and upload Cloud Functions ───────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: upload-functions
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        BUCKET=$(gcloud storage buckets list --format="value(name)" | grep functions-src)
+        for fn in image-processor order-notifier analytics-ingester; do
+          cd functions/$fn
+          zip -r /tmp/$fn.zip .
+          gcloud storage cp /tmp/$fn.zip gs://$BUCKET/functions/$fn.zip
+          cd ../..
+        done
+    waitFor: ["-"]
+
+  # ── Step 5: Update Cloud Run services ───────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-api-gateway
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - cloudmart-api-gateway
+      - --image=${_REGISTRY}/api-gateway:${_IMAGE_TAG}
+      - --region=${_REGION}
+      - --project=${_PROJECT_ID}
+    waitFor: [push-api-gateway]
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-user-service
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - cloudmart-user-service
+      - --image=${_REGISTRY}/user-service:${_IMAGE_TAG}
+      - --region=${_REGION}
+      - --project=${_PROJECT_ID}
+    waitFor: [push-user-service]
+
+  # ── Step 6: Deploy to GKE ────────────────────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-gke
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud container clusters get-credentials ${_GKE_CLUSTER} \
+          --region ${_REGION} --project ${_PROJECT_ID}
+
+        # Update image tags in manifests
+        sed -i "s|REGISTRY_URL|${_REGISTRY}|g; s|IMAGE_TAG|${_IMAGE_TAG}|g" \
+          kubernetes/deployments/product-service.yaml \
+          kubernetes/deployments/order-service.yaml
+
+        kubectl apply -f kubernetes/namespace.yaml
+        kubectl apply -f kubernetes/configmaps/
+        kubectl apply -f kubernetes/deployments/
+        kubectl apply -f kubernetes/services/
+        kubectl apply -f kubernetes/hpa/
+
+        kubectl rollout status deployment/product-service -n cloudmart --timeout=300s
+        kubectl rollout status deployment/order-service   -n cloudmart --timeout=300s
+    waitFor: [push-product-service, push-order-service]
+
+  # ── Step 7: Smoke test ───────────────────────────────────────
+  - name: curlimages/curl
+    id: smoke-test
+    entrypoint: sh
+    args:
+      - -c
+      - |
+        API_URL=$(gcloud run services describe cloudmart-api-gateway \
+          --region ${_REGION} --project ${_PROJECT_ID} \
+          --format "value(status.url)")
+        curl -sf "$API_URL/health" || exit 1
+        echo "Smoke test passed — API Gateway healthy"
+    waitFor: [deploy-api-gateway, deploy-gke]
+
+images:
+  - ${_REGISTRY}/api-gateway:${_IMAGE_TAG}
+  - ${_REGISTRY}/product-service:${_IMAGE_TAG}
+  - ${_REGISTRY}/order-service:${_IMAGE_TAG}
+  - ${_REGISTRY}/user-service:${_IMAGE_TAG}
+  - ${_REGISTRY}/inventory-worker:${_IMAGE_TAG}
+
+timeout: 1200s

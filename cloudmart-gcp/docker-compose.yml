@@ -1,0 +1,138 @@
+version: "3.9"
+
+# Local development environment — mirrors GCP services with local equivalents
+# Start: docker compose up -d
+
+services:
+
+  # ── Local Databases ────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: cloudmart
+      POSTGRES_USER: cloudmart_admin
+      POSTGRES_PASSWORD: dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudmart_admin -d cloudmart"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+
+  # Firestore emulator (local Firestore)
+  firestore-emulator:
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    command: gcloud emulators firestore start --host-port=0.0.0.0:8200
+    ports:
+      - "8200:8200"
+
+  # Pub/Sub emulator
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+
+  # MinIO as local GCS substitute
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: cloudmart
+      MINIO_ROOT_PASSWORD: cloudmart_dev
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  # ── Application Services ───────────────────────────────────
+  product-service:
+    build: services/product-service
+    ports:
+      - "8081:8080"
+    environment:
+      GCP_PROJECT: local-dev
+      FIRESTORE_EMULATOR_HOST: firestore-emulator:8200
+      ENVIRONMENT: dev
+    depends_on:
+      - firestore-emulator
+
+  order-service:
+    build: services/order-service
+    ports:
+      - "8082:8080"
+    environment:
+      DB_HOST: postgres
+      DB_USER: cloudmart_admin
+      DB_PASS: dev_password
+      DB_NAME: cloudmart
+      GCP_PROJECT: local-dev
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+      PUBSUB_TOPIC: cloudmart-orders
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pubsub-emulator:
+        condition: service_started
+
+  user-service:
+    build: services/user-service
+    ports:
+      - "8083:8080"
+    environment:
+      DB_HOST: postgres
+      DB_USER: cloudmart_admin
+      DB_PASS: dev_password
+      DB_NAME: cloudmart
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      JWT_SECRET: local-dev-jwt-secret-min-32-chars-long
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  api-gateway:
+    build: services/api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      NODE_ENV: development
+      PRODUCT_SERVICE_URL: http://product-service:8080
+      ORDER_SERVICE_URL:   http://order-service:8080
+      USER_SERVICE_URL:    http://user-service:8080
+      JWT_SECRET: local-dev-jwt-secret-min-32-chars-long
+      GCS_BUCKET: cloudmart-images-local
+      PUBSUB_TOPIC: cloudmart-orders
+      GCP_PROJECT: local-dev
+    depends_on:
+      - product-service
+      - order-service
+      - user-service
+
+  frontend:
+    build: frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+    depends_on:
+      - api-gateway
+
+volumes:
+  postgres_data:
+  minio_data:

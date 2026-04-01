@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudmart-config
+  namespace: cloudmart
+data:
+  NODE_ENV:       "production"
+  ENVIRONMENT:    "prod"
+  GCP_PROJECT:    "YOUR_PROJECT_ID"        # replaced by deploy.sh
+  PUBSUB_TOPIC:   "cloudmart-orders"
+  DB_NAME:        "cloudmart"
+  DB_USER:        "cloudmart_admin"
+  LOG_LEVEL:      "info"
+  PORT:           "8080"

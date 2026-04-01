@@ -1,0 +1,50 @@
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/terraform.tfvars
+!terraform/terraform.tfvars.example
+terraform/.terraform.lock.hcl
+
+# Node.js
+node_modules/
+*/node_modules/
+.next/
+*.log
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+.pytest_cache/
+
+# Go
+workers/*/vendor/
+workers/*/*.exe
+
+# Docker
+*.zip
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Keys & credentials
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!next.config.js
+service-account-key.json
+gcp-key.json
